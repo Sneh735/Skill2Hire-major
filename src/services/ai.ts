@@ -26,17 +26,29 @@ export interface RoadmapStep {
   resources: string[];
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data?.error || `Request failed with status ${response.status}`);
+async function postJson<T>(url: string, body: unknown, timeoutMs = 25000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.error || `Request failed with status ${response.status}`);
+    }
+    return data as T;
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      throw new Error("AI request timed out. Please try again.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return data as T;
 }
 
 export const analyzeResume = async (text: string): Promise<ResumeAnalysis> => {
@@ -83,12 +95,37 @@ export const parseResumeWithAI = async (
 export const askCourseAiTutor = async (
   courseTitle: string,
   moduleTitle: string,
-  userQuestion: string
+  userQuestion: string,
+  moduleSummary?: string,
+  history: { role: 'user' | 'assistant'; text: string }[] = []
 ): Promise<string> => {
   const res = await postJson<{ text: string }>("/api/ai/course-tutor", {
     courseTitle,
     moduleTitle,
     userQuestion,
+    moduleSummary,
+    history,
   });
   return res.text;
+};
+
+export const transcribeAudio = async (
+  audioBase64: string,
+  mimeType = "audio/webm"
+): Promise<string> => {
+  const res = await postJson<{ text: string }>("/api/ai/transcribe-audio", {
+    audioBase64,
+    mimeType,
+  });
+  return res.text;
+};
+
+export const synthesizeSpeech = async (
+  text: string
+): Promise<{ audioBase64: string; mimeType: string }> => {
+  return postJson<{ audioBase64: string; mimeType: string }>(
+    "/api/ai/tts",
+    { text },
+    15000
+  );
 };

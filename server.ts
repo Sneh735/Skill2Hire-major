@@ -40,20 +40,44 @@ const cleanJsonText = (raw: string | undefined): string => {
     .trim();
 };
 
+const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise
+      .then((val) => {
+        clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+};
+
 const generateWithFallback = async (
   ai: GoogleGenAI,
-  params: { contents: any; config?: any }
+  params: { contents: any; config?: any; preferFast?: boolean }
 ) => {
-  const models = [PRIMARY_GEMINI_MODEL, FALLBACK_GEMINI_MODEL];
+  const models = params.preferFast
+    ? [FALLBACK_GEMINI_MODEL, PRIMARY_GEMINI_MODEL]
+    : [PRIMARY_GEMINI_MODEL, FALLBACK_GEMINI_MODEL];
   let lastError: any;
 
   for (let i = 0; i < models.length; i++) {
+    const timeoutMs = i === 0 ? 9000 : 15000;
     try {
-      return await ai.models.generateContent({
-        model: models[i],
-        contents: params.contents,
-        config: params.config,
-      });
+      return await withTimeout(
+        ai.models.generateContent({
+          model: models[i],
+          contents: params.contents,
+          config: params.config,
+        }),
+        timeoutMs,
+        `Gemini (${models[i]})`
+      );
     } catch (err: any) {
       lastError = err;
       const msg = String(err?.message || "").toLowerCase();
@@ -61,14 +85,19 @@ const generateWithFallback = async (
       const isTransient =
         status === 503 ||
         status === 429 ||
+        status === 500 ||
         msg.includes("503") ||
+        msg.includes("500") ||
+        msg.includes("timed out") ||
+        msg.includes("timeout") ||
         msg.includes("unavailable") ||
         msg.includes("high demand") ||
-        msg.includes("resource_exhausted");
+        msg.includes("resource_exhausted") ||
+        msg.includes("fetch failed");
       if (!isTransient || i === models.length - 1) {
         throw err;
       }
-      await new Promise((r) => setTimeout(r, 350));
+      await new Promise((r) => setTimeout(r, 250));
     }
   }
   throw lastError;
@@ -122,7 +151,23 @@ async function startServer() {
 
   // Health check
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const geminiConfigured = Boolean(
+      geminiKey &&
+        geminiKey !== "YOUR_GEMINI_API_KEY_HERE" &&
+        geminiKey !== "YOUR_GEMINI_API_KEY"
+    );
+    const smtpConfigured = Boolean(
+      process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS
+    );
+    res.json({
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      env: {
+        geminiConfigured,
+        smtpConfigured,
+      },
+    });
   });
 
   // 1. FORGOT PASSWORD: Send OTP to Email
@@ -398,12 +443,28 @@ async function startServer() {
   app.post("/api/ai/interview-feedback", async (req, res) => {
     try {
       const { topic, history = [] } = req.body;
-      if (!topic) {
+      if (!topic || !String(topic).trim()) {
         return res.status(400).json({ error: "Interview topic is required." });
       }
+      const cleanTopic = String(topic).trim();
+      const safeHistory = Array.isArray(history) ? history.slice(-10) : [];
+      const hasPreviousAnswer = safeHistory.some((m: any) => m?.role === "user");
+
       const ai = getGeminiClient();
+      const prompt = hasPreviousAnswer
+        ? `You are an experienced, supportive technical interviewer conducting a live voice mock interview on "${cleanTopic}".
+Conversation so far:
+${JSON.stringify(safeHistory)}
+
+Tasks:
+1. Give concise, constructive feedback (2-3 sentences max) on the candidate's latest answer: mention what was strong and one specific detail or trade-off they could add.
+2. Ask ONE natural, clear follow-up or next technical interview question (1-2 sentences, conversational for text-to-speech).`
+        : `You are an experienced, supportive technical interviewer starting a live voice mock interview on "${cleanTopic}".
+Ask ONE clear, welcoming opening technical interview question (1-2 sentences, conversational so it sounds natural when spoken aloud). Leave "feedback" empty.`;
+
       const response = await generateWithFallback(ai, {
-        contents: `You are an interviewer. Topic: ${topic}. Interview history: ${JSON.stringify(history)}. Please provide the next question and brief feedback on the previous answer if applicable.`,
+        preferFast: true,
+        contents: prompt,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -417,8 +478,13 @@ async function startServer() {
         }
       });
 
-      const parsed = JSON.parse(response.text || "{}");
-      res.json(parsed);
+      const parsed = JSON.parse(cleanJsonText(response.text));
+      res.json({
+        question:
+          parsed.question ||
+          `Let's discuss a core concept in ${cleanTopic}. How have you applied it in a project?`,
+        feedback: hasPreviousAnswer ? parsed.feedback || "" : undefined,
+      });
     } catch (err: any) {
       console.error("Error in /api/ai/interview-feedback:", err);
       res.status(err?.status || 500).json({ error: err?.message || "Failed to generate interview question." });
@@ -428,11 +494,12 @@ async function startServer() {
   app.post("/api/ai/career-assistant", async (req, res) => {
     try {
       const { prompt, history = [] } = req.body;
-      if (!prompt) {
+      if (!prompt || !String(prompt).trim()) {
         return res.status(400).json({ error: "Prompt is required." });
       }
       const ai = getGeminiClient();
       const response = await generateWithFallback(ai, {
+        preferFast: true,
         contents: `You are a supportive, expert Virtual Career Mentor and EdTech guide on the "Skill to Hire" platform.
 Candidate Question: "${prompt}"
 Conversation History: ${JSON.stringify(history)}
@@ -593,30 +660,188 @@ JSON format required:
 
   app.post("/api/ai/course-tutor", async (req, res) => {
     try {
-      const { courseTitle, moduleTitle, userQuestion } = req.body;
-      if (!userQuestion) {
+      const { courseTitle, moduleTitle, userQuestion, moduleSummary, history = [] } = req.body;
+      if (!userQuestion || !String(userQuestion).trim()) {
         return res.status(400).json({ error: "Question is required." });
       }
       const ai = getGeminiClient();
-      const prompt = `You are a friendly, expert tech mentor teaching the course "${courseTitle}", specifically the module "${moduleTitle}".
-A student has asked this doubt:
-"${userQuestion}"
+      const safeHistory = Array.isArray(history) ? history.slice(-6) : [];
+      const prompt = `You are a friendly, expert tech mentor teaching the course "${courseTitle || "Tech Course"}", specifically the module "${moduleTitle || "Current Module"}".
+${moduleSummary ? `Module focus: ${moduleSummary}\n` : ""}${safeHistory.length ? `Recent conversation:\n${JSON.stringify(safeHistory)}\n` : ""}Student's question:
+"${String(userQuestion).trim()}"
 
 Provide a crystal clear, engaging, and practical explanation.
 Guidelines:
 1. Explain in simple terms using a quick real-world analogy.
-2. Provide a concrete code or framework snippet if relevant.
-3. Keep it concise (around 120-180 words), encouraging, and structured with bullet points.`;
+2. Provide a concrete code or practical example if relevant.
+3. Keep it concise (around 120-180 words), encouraging, and structured with clear bullet points.`;
 
       const response = await generateWithFallback(ai, {
+        preferFast: true,
         contents: prompt
       });
       res.json({
-        text: response.text || `Here is an explanation of ${userQuestion} for ${courseTitle}.`
+        text: response.text || `Here is an explanation of ${userQuestion} for ${courseTitle || "this course"}.`
       });
     } catch (err: any) {
       console.error("Error in /api/ai/course-tutor:", err);
       res.status(err?.status || 500).json({ error: err?.message || "Failed to contact course AI tutor." });
+    }
+  });
+
+  app.post("/api/ai/transcribe-audio", async (req, res) => {
+    try {
+      const { audioBase64, mimeType = "audio/webm" } = req.body;
+      if (!audioBase64 || typeof audioBase64 !== "string") {
+        return res.status(400).json({ error: "Audio payload is required." });
+      }
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey || apiKey === "YOUR_GEMINI_API_KEY_HERE" || apiKey === "YOUR_GEMINI_API_KEY") {
+        return res.status(503).json({ error: "GEMINI_API_KEY is missing." });
+      }
+
+      const transcribeClient = new GoogleGenAI({
+        apiKey,
+        apiVersion: "v1beta",
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+
+      const contents = {
+        parts: [
+          {
+            inlineData: {
+              mimeType: String(mimeType).split(";")[0] || "audio/webm",
+              data: audioBase64,
+            },
+          },
+          {
+            text: "Transcribe this spoken technical interview response cleanly. Output only the spoken words without extra commentary. If no speech is audible, return an empty string.",
+          },
+        ],
+      };
+
+      const models = ["gemini-3.5-transcribe", FALLBACK_GEMINI_MODEL, PRIMARY_GEMINI_MODEL];
+      let response: any;
+      let lastErr: any;
+
+      for (const model of models) {
+        try {
+          response = await withTimeout(
+            transcribeClient.models.generateContent({ model, contents }),
+            12000,
+            `Transcribe (${model})`
+          );
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          const msg = String(err?.message || "").toLowerCase();
+          if (
+            msg.includes("not found") ||
+            msg.includes("404") ||
+            msg.includes("503") ||
+            msg.includes("429") ||
+            msg.includes("timed out") ||
+            msg.includes("unavailable")
+          ) {
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      if (!response) throw lastErr || new Error("Transcription failed.");
+
+      res.json({ text: (response.text || "").trim() });
+    } catch (err: any) {
+      console.error("Error in /api/ai/transcribe-audio:", err);
+      res.status(err?.status || 500).json({ error: err?.message || "Failed to transcribe audio." });
+    }
+  });
+
+  app.post("/api/ai/tts", async (req, res) => {
+    try {
+      const { text } = req.body;
+      if (!text || !String(text).trim()) {
+        return res.status(400).json({ error: "Text is required for speech synthesis." });
+      }
+      const cleanText = String(text).replace(/[*_#`]/g, "").trim().slice(0, 1200);
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey || apiKey === "YOUR_GEMINI_API_KEY_HERE" || apiKey === "YOUR_GEMINI_API_KEY") {
+        return res.status(503).json({ error: "GEMINI_API_KEY is missing." });
+      }
+
+      const ttsClient = new GoogleGenAI({
+        apiKey,
+        apiVersion: "v1beta",
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+
+      let response: any;
+      try {
+        response = await withTimeout(
+          ttsClient.models.generateContent({
+            model: "gemini-3.8-flash-lite-tts",
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: cleanText,
+                    speechMetadata: {
+                      style: "Warm, encouraging, clear technical interviewer",
+                    },
+                  },
+                ],
+              },
+            ],
+            config: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: "Kore" },
+                },
+              },
+            },
+          }),
+          12000,
+          "Gemini TTS"
+        );
+      } catch (innerErr: any) {
+        const msg = String(innerErr?.message || "");
+        if (msg.includes("Cannot find field")) {
+          response = await withTimeout(
+            ttsClient.models.generateContent({
+              model: "gemini-3.8-flash-lite-tts",
+              contents: cleanText,
+              config: {
+                responseModalities: ["AUDIO"],
+              },
+            }),
+            12000,
+            "Gemini TTS (fallback)"
+          );
+        } else {
+          throw innerErr;
+        }
+      }
+
+      const audioBase64 =
+        response?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!audioBase64) {
+        return res.status(502).json({ error: "No audio returned by TTS model." });
+      }
+      res.json({ audioBase64, mimeType: "audio/wav" });
+    } catch (err: any) {
+      console.error("Error in /api/ai/tts:", err);
+      res.status(err?.status || 500).json({ error: err?.message || "Failed to synthesize speech." });
     }
   });
 

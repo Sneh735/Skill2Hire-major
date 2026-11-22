@@ -27,6 +27,7 @@ import { Course, CourseModule } from '../types';
 import { getCourseModules, getCourseVideoUrl } from '../data/courseModules';
 import { askCourseAiTutor } from '../services/ai';
 import jsPDF from 'jspdf';
+import ReactMarkdown from 'react-markdown';
 
 interface CourseContentProps {
   course: Course;
@@ -45,7 +46,9 @@ export default function CourseContent({ course, onClose, onComplete, userName }:
 
   // AI Tutor State
   const [tutorQuestion, setTutorQuestion] = useState('');
-  const [tutorAnswer, setTutorAnswer] = useState<string | null>(null);
+  const [tutorMessages, setTutorMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([]);
+  const [tutorError, setTutorError] = useState<string | null>(null);
+  const [lastAskedQuestion, setLastAskedQuestion] = useState('');
   const [isAskingTutor, setIsAskingTutor] = useState(false);
 
   // Quiz State
@@ -123,28 +126,45 @@ export default function CourseContent({ course, onClose, onComplete, userName }:
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
-  const handleAskTutor = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!tutorQuestion.trim() || isAskingTutor) return;
+  const submitTutorQuestion = async (questionText: string) => {
+    const cleanQ = questionText.trim();
+    if (!cleanQ || isAskingTutor) return;
 
+    const nextHistory = [...tutorMessages, { role: 'user' as const, text: cleanQ }];
+    setTutorMessages(nextHistory);
+    setTutorQuestion('');
+    setLastAskedQuestion(cleanQ);
+    setTutorError(null);
     setIsAskingTutor(true);
-    setTutorAnswer(null);
 
     try {
-      const response = await askCourseAiTutor(course.title, currentModule.title, tutorQuestion.trim());
-      setTutorAnswer(response);
-    } catch (err) {
-      console.error(err);
-      setTutorAnswer("Could not reach AI Tutor at this moment. Please review the module notes above!");
+      const response = await askCourseAiTutor(
+        course.title,
+        currentModule.title,
+        cleanQ,
+        currentModule.summary,
+        tutorMessages
+      );
+      setTutorMessages(prev => [...prev, { role: 'assistant', text: response }]);
+    } catch (err: any) {
+      console.error('Course AI Mentor error:', err);
+      setTutorError(err?.message || 'Could not reach AI Mentor right now. Please retry.');
     } finally {
       setIsAskingTutor(false);
     }
   };
 
+  const handleAskTutor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitTutorQuestion(tutorQuestion);
+  };
+
   const handleSelectModule = (index: number) => {
     setActiveModuleIndex(index);
-    setTutorAnswer(null);
+    setTutorMessages([]);
+    setTutorError(null);
     setTutorQuestion('');
+    setLastAskedQuestion('');
   };
 
   const handleCompleteCheckpoint = (index: number) => {
@@ -586,8 +606,8 @@ export default function CourseContent({ course, onClose, onComplete, userName }:
 
                   {/* Interactive AI Mentor / Doubt Explainer */}
                   <div className="bg-gradient-to-r from-blue-50/80 via-indigo-50/80 to-purple-50/80 border border-blue-200/70 rounded-3xl p-6 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
                         <div className="w-8 h-8 rounded-xl bg-brand-blue text-white flex items-center justify-center shadow-md">
                           <Sparkles className="w-4 h-4 text-amber-300" />
                         </div>
@@ -596,12 +616,44 @@ export default function CourseContent({ course, onClose, onComplete, userName }:
                           <p className="text-[11px] text-slate-500 font-medium">Instant explanation, analogies, or practical examples</p>
                         </div>
                       </div>
+                      {tutorMessages.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTutorMessages([]);
+                            setTutorError(null);
+                          }}
+                          className="text-[11px] font-bold text-slate-500 hover:text-brand-blue px-2.5 py-1 rounded-lg hover:bg-white/70 transition-colors"
+                        >
+                          Clear chat
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Quick Prompt Suggestions */}
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        'Explain this module simply',
+                        'Give a real-world analogy',
+                        'Show a practical example',
+                        'Quiz me with 1 quick question',
+                      ].map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          disabled={isAskingTutor}
+                          onClick={() => submitTutorQuestion(suggestion)}
+                          className="px-3 py-1.5 bg-white/90 hover:bg-white border border-blue-200/80 hover:border-brand-blue text-[11px] font-semibold text-slate-700 hover:text-brand-blue rounded-xl transition-all disabled:opacity-50"
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
                     </div>
 
                     <form onSubmit={handleAskTutor} className="flex gap-2">
                       <input 
                         type="text" 
-                        placeholder={`e.g., Explain ${currentModule.title.split(':')[1] || 'this concept'} with a simple analogy...`}
+                        placeholder={`e.g., Explain ${currentModule.title.split(':')[1]?.trim() || currentModule.title} with a simple analogy...`}
                         value={tutorQuestion}
                         onChange={(e) => setTutorQuestion(e.target.value)}
                         className="flex-1 px-4 py-3 bg-white border border-slate-200 rounded-2xl text-xs md:text-sm outline-none focus:border-brand-blue shadow-sm font-medium"
@@ -612,25 +664,66 @@ export default function CourseContent({ course, onClose, onComplete, userName }:
                         className="px-5 py-3 bg-brand-blue hover:bg-brand-blue-dark disabled:opacity-50 text-white rounded-2xl font-bold text-xs flex items-center gap-2 shadow-md transition-all active:scale-95 shrink-0"
                       >
                         {isAskingTutor ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                        <span>Ask AI</span>
+                        <span>{isAskingTutor ? 'Thinking...' : 'Ask AI'}</span>
                       </button>
                     </form>
 
-                    {/* AI Answer Display */}
-                    {tutorAnswer && (
-                      <motion.div 
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="bg-white p-5 rounded-2xl border border-blue-200 text-xs md:text-sm text-slate-800 leading-relaxed font-medium shadow-sm space-y-2"
-                      >
-                        <div className="font-bold text-brand-blue flex items-center gap-1.5 text-xs">
-                          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                          <span>AI Mentor Guidance:</span>
-                        </div>
-                        <div className="whitespace-pre-line text-slate-700">
-                          {tutorAnswer}
-                        </div>
-                      </motion.div>
+                    {/* AI Conversation Display */}
+                    {tutorMessages.length > 0 && (
+                      <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
+                        {tutorMessages.map((msg, idx) => (
+                          <motion.div
+                            key={idx}
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className={cn(
+                              'p-4 rounded-2xl text-xs md:text-sm leading-relaxed shadow-sm',
+                              msg.role === 'user'
+                                ? 'bg-brand-blue text-white ml-8 font-medium'
+                                : 'bg-white border border-blue-200 text-slate-800 mr-4'
+                            )}
+                          >
+                            {msg.role === 'assistant' && (
+                              <div className="font-bold text-brand-blue flex items-center gap-1.5 text-xs mb-1.5">
+                                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                                <span>AI Mentor Guidance:</span>
+                              </div>
+                            )}
+                            {msg.role === 'assistant' ? (
+                              <div className="prose prose-sm max-w-none text-slate-700 prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-slate-900 prose-pre:text-slate-100 prose-pre:p-3 prose-pre:rounded-xl prose-code:text-brand-blue">
+                                <ReactMarkdown>{msg.text}</ReactMarkdown>
+                              </div>
+                            ) : (
+                              <div>{msg.text}</div>
+                            )}
+                          </motion.div>
+                        ))}
+                        {isAskingTutor && (
+                          <div className="bg-white border border-blue-200 p-4 rounded-2xl mr-4 flex items-center gap-2 text-xs text-slate-500 font-medium">
+                            <Loader2 className="w-4 h-4 animate-spin text-brand-blue" />
+                            <span>AI Mentor is preparing an explanation...</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {tutorError && (
+                      <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-center justify-between gap-3 text-xs text-red-700">
+                        <span className="font-medium">{tutorError}</span>
+                        {lastAskedQuestion && (
+                          <button
+                            type="button"
+                            disabled={isAskingTutor}
+                            onClick={() => {
+                              setTutorMessages(prev => prev.slice(0, -1));
+                              submitTutorQuestion(lastAskedQuestion);
+                            }}
+                            className="px-3 py-1.5 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 shrink-0 transition-colors"
+                          >
+                            Retry
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
 
