@@ -1,0 +1,213 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and educational status",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "keySkills": { "type": "array", "items": { "type": "string" } },
+        "experience": { "type": "number" },
+        "education": { "type": "string" },
+        "bio": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "completedCourses": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Course": {
+      "title": "Course",
+      "description": "Educational content provided by the platform",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "domain": { "type": "string" },
+        "duration": { "type": "string" },
+        "points": { "type": "number" }
+      },
+      "required": ["id", "title", "domain"]
+    },
+    "Certificate": {
+      "title": "Certificate",
+      "description": "Digital credential issued upon course completion",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "courseId": { "type": "string" },
+        "courseTitle": { "type": "string" },
+        "issuedAt": { "type": "string", "format": "date-time" },
+        "certificateUrl": { "type": "string" }
+      },
+      "required": ["id", "userId", "courseId"]
+    },
+    "Enrollment": {
+      "title": "Enrollment",
+      "description": "User enrollment in a specific course",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "courseId": { "type": "string" },
+        "progress": { "type": "number" },
+        "status": { "type": "string", "enum": ["enrolled", "in_progress", "completed"] },
+        "score": { "type": "number" },
+        "certificateGenerated": { "type": "boolean" },
+        "enrolledAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "courseId"]
+    },
+    "SkillAnalysis": {
+      "title": "Skill Analysis",
+      "description": "AI analysis of user skills vs targets",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "resumeText": { "type": "string" },
+        "analysis": { "type": "string" },
+        "roadmap": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "analysis"]
+    },
+    "InterviewHistory": {
+      "title": "Interview History",
+      "description": "Logs of AI mock interviews",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "topic": { "type": "string" },
+        "chat": { "type": "array", "items": { "type": "object" } },
+        "feedback": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "topic"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "System or behavioral updates for the user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string", "enum": ["system", "course", "interview", "achievement"] },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "message", "type", "read"]
+    },
+    "Resume": {
+      "title": "Resume",
+      "description": "User's professional resume data",
+      "type": "object",
+      "properties": {
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "linkedin": { "type": "string" },
+        "summary": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "technicalSkills": { "type": "array", "items": { "type": "string" } },
+        "nonTechnicalSkills": { "type": "array", "items": { "type": "string" } },
+        "education": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "degree": { "type": "string" },
+              "school": { "type": "string" },
+              "specialization": { "type": "string" },
+              "startYear": { "type": "string" },
+              "endYear": { "type": "string" },
+              "cgpa": { "type": "string" }
+            }
+          } 
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "technologies": { "type": "string" },
+              "githubLink": { "type": "string" },
+              "liveDemo": { "type": "string" },
+              "duration": { "type": "string" }
+            }
+          }
+        },
+        "certifications": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "organization": { "type": "string" },
+              "issueDate": { "type": "string" },
+              "pdfUrl": { "type": "string" }
+            }
+          }
+        },
+        "achievements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "date": { "type": "string" },
+              "organization": { "type": "string" }
+            }
+          }
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Private user profiles"
+    },
+    "/users/{userId}/resume": {
+      "schema": "Resume",
+      "description": "User's detailed resume data"
+    },
+    "/courses/{courseId}": {
+      "schema": "Course",
+      "description": "List of available courses"
+    },
+    "/enrollments/{enrollmentId}": {
+      "schema": "Enrollment",
+      "description": "User course enrollments"
+    },
+    "/certificates/{certId}": {
+      "schema": "Certificate",
+      "description": "Issued certificates log"
+    },
+    "/skill_analysis/{analysisId}": {
+      "schema": "SkillAnalysis",
+      "description": "User skill gap analysis records"
+    },
+    "/interview_history/{interviewId}": {
+      "schema": "InterviewHistory",
+      "description": "Mock interview sessions"
+    },
+    "/notifications/{notifId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    }
+  }
+}

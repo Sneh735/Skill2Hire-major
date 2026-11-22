@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function incoming() { return request.resource.data; }
+
+    // --- Collection Rules ---
+
+    match /users/{userId} {
+      allow get, write: if isOwner(userId);
+    }
+
+    match /courses/{courseId} {
+      allow read: if true;
+      allow create: if isSignedIn();
+    }
+
+    match /enrollments/{id} {
+      allow list, get: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    match /notifications/{id} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    match /certificates/{id} {
+      allow list, get, create: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid || incoming().userId == request.auth.uid);
+    }
+
+    match /skill_analysis/{id} {
+      allow list, get, create: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid || incoming().userId == request.auth.uid);
+    }
+
+    match /interview_history/{id} {
+      allow list, get, create: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid || incoming().userId == request.auth.uid);
+    }
+  }
+}

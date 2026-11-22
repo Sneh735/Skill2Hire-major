@@ -1,0 +1,1109 @@
+import React, { useState, useEffect } from 'react';
+import { auth, loginWithGoogle, logout, db, handleFirestoreError, OperationType } from './lib/firebase';
+import { 
+  onAuthStateChanged, 
+  User, 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  updateProfile 
+} from 'firebase/auth';
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  onSnapshot, 
+  orderBy, 
+  updateDoc,
+  limit
+} from 'firebase/firestore';
+import ResumeUploader from './components/ResumeUploader';
+import AuthPage from './components/AuthPage';
+import { CourseCard } from './components/CourseCard';
+import ProfileEditor from './components/ProfileEditor';
+import CourseContent from './components/CourseContent';
+import { ResumeAnalysis } from './services/ai';
+import { Course, UserRole } from './types';
+import { cn, getAvatarUrl } from './lib/utils';
+import firebaseConfigData from '../firebase-applet-config.json';
+import { 
+  GraduationCap, 
+  LayoutDashboard, 
+  Search, 
+  LogOut, 
+  User as UserIcon, 
+  Sparkles, 
+  Github, 
+  Mail, 
+  Linkedin, 
+  BookOpen, 
+  Bell, 
+  Settings, 
+  ChevronRight, 
+  Clock, 
+  Map, 
+  FileText, 
+  Briefcase,
+  Users
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import ResumeScoreChart from './components/ResumeScoreChart';
+import { COURSES } from './data/courses';
+import CareerPath from './components/CareerPath';
+import MockInterview from './components/MockInterview';
+import ResumeBuilder from './components/ResumeBuilder';
+import JobMatching from './components/JobMatching';
+import VirtualCareerAssistant from './components/VirtualCareerAssistant';
+import Career2SkillDashboard from './components/Career2SkillDashboard';
+import CourseCatalogSection from './components/CourseCatalogSection';
+import LandingPage from './components/LandingPage';
+
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<'home' | 'login' | 'register'>('home');
+  const [userRole, setUserRole] = useState<UserRole>('student');
+  const [dashboardTab, setDashboardTab] = useState<'overview' | 'profile' | 'my_courses' | 'path' | 'interview' | 'resume' | 'builder' | 'job_match' | 'career2skill'>('overview');
+  const [analysis, setAnalysis] = useState<ResumeAnalysis | null>(null);
+  const [completedCourses, setCompletedCourses] = useState<string[]>([]);
+  const [enrollments, setEnrollments] = useState<Record<string, { progress: number, status: string }>>({});
+  const [activeCourse, setActiveCourse] = useState<Course | null>(null);
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [firebaseError, setFirebaseError] = useState<{ path: string, message: string } | null>(null);
+  const [pinModal, setPinModal] = useState<{ isOpen: boolean, courseId: string | null, error: string | null, pin: string }>({
+    isOpen: false,
+    courseId: null,
+    error: null,
+    pin: ''
+  });
+
+  // Auth form state
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // Search & Notifications state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [homeCourseSearch, setHomeCourseSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [searchResults, setSearchResults] = useState<Course[]>([]);
+  const [dbCourses, setDbCourses] = useState<Course[]>(COURSES);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  const handleAddCustomCourse = (newCourse: Course) => {
+    setDbCourses(prev => [newCourse, ...prev.filter(c => c.id !== newCourse.id)]);
+  };
+
+  // Fetch courses from DB
+  useEffect(() => {
+    const fetchCourses = async () => {
+      // Always start with local COURSES to ensure UI is immediate
+      setDbCourses(COURSES);
+      
+      try {
+        const coursesSnap = await getDocs(collection(db, "courses"));
+        if (!coursesSnap.empty) {
+          const coursesList: Course[] = [];
+          coursesSnap.forEach(d => coursesList.push(d.data() as Course));
+          setDbCourses(coursesList);
+        }
+      } catch (err: any) {
+        // Silent fail for courses, we already have the local fallback
+        if (!err.message?.toLowerCase().includes("permission")) {
+           console.error("Course fetch error:", err);
+        }
+      }
+    };
+    fetchCourses();
+  }, [user]); // Re-fetch on login state change if needed, but works for guest too
+
+  // Debounce search query
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (debouncedSearch.trim().length > 1) {
+      const results = dbCourses.filter(course => 
+        course.title.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+        course.description.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+        course.domain.toLowerCase().includes(debouncedSearch.toLowerCase())
+      );
+      setSearchResults(results);
+    } else {
+      setSearchResults([]);
+    }
+  }, [debouncedSearch, dbCourses]);
+
+  // Notifications Listener
+  useEffect(() => {
+    if (!user) {
+      setNotifications([]);
+      return;
+    }
+
+    const notifPath = "notifications";
+    const notifQuery = query(
+      collection(db, notifPath),
+      where("userId", "==", user.uid),
+      limit(20) // Removed orderBy to avoid requiring index immediately
+    );
+    
+    const unsubscribe = onSnapshot(notifQuery, (snapshot) => {
+      const notifs: any[] = [];
+      snapshot.forEach(d => notifs.push({ id: d.id, ...d.data() }));
+      setNotifications(notifs);
+    }, (err: any) => {
+      console.error("Notifications fetch error:", err);
+      // Don't show full screen error for background notification polling
+      // but log it enough to be caught by the Diagnostic tool
+      if (err.message.toLowerCase().includes("permission")) {
+        console.warn("Permission denied for notifications. Verify rules and index.");
+      }
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+      setUser(u);
+      if (u) {
+        setLoading(true);
+        try {
+          // Parallel fetch for speed
+          const [profileSnap, enrollmentsSnap] = await Promise.all([
+            getDoc(doc(db, "users", u.uid)),
+            getDocs(query(collection(db, "enrollments"), where("userId", "==", u.uid)))
+          ]);
+
+          // Handle Profile
+          if (profileSnap.exists()) {
+            const data = profileSnap.data();
+            setCompletedCourses(data.completedCourses || []);
+            setUserProfile(data);
+            if (data.role) {
+              setUserRole(data.role);
+              if (data.role === 'employee') {
+                setDashboardTab('career2skill');
+              }
+            }
+          } else {
+            console.log("No profile found, creating default for:", u.uid);
+            const newUser = {
+              uid: u.uid,
+              email: u.email || "",
+              displayName: u.displayName || (userRole === 'employee' ? "Recruiter / Employee" : "Learner"),
+              role: userRole,
+              photoURL: u.photoURL || "",
+              linkedin: '',
+              github: '',
+              resumeUrl: '',
+              bio: '',
+              phoneNumber: '',
+              education: '',
+              graduationDetails: '',
+              dob: '',
+              enrollmentPin: '',
+              experience: 0,
+              keySkills: [],
+              completedCourses: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            await setDoc(doc(db, "users", u.uid), newUser);
+            setCompletedCourses([]);
+            setUserProfile(newUser);
+          }
+
+          // Handle Enrollments
+          const enrollMap: Record<string, any> = {};
+          enrollmentsSnap.forEach(snap => {
+            const d = snap.data();
+            enrollMap[d.courseId] = { progress: d.progress, status: d.status };
+          });
+          setEnrollments(enrollMap);
+
+        } catch (err: any) {
+          console.error("Initialization error:", err);
+          if (err.message?.toLowerCase().includes("permission")) {
+            setFirebaseError({ path: "Initialization", message: "Permission Denied. Please check your Firestore rules." });
+          }
+          handleFirestoreError(err, OperationType.GET, "app_init");
+        } finally {
+          setLoading(false);
+        }
+      } else {
+        setLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const markNotificationRead = async (id: string) => {
+    const notifRef = doc(db, "notifications", id);
+    try {
+      await updateDoc(notifRef, { read: true });
+    } catch (err) {
+      console.error("Failed to mark notification as read", err);
+    }
+  };
+
+  const handleAnalysisComplete = async (data: ResumeAnalysis) => {
+    setAnalysis(data);
+  };
+
+  const handleEmailAuth = async (e: React.FormEvent, type: 'login' | 'register') => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      if (type === 'register') {
+        const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+        await updateProfile(userCredential.user, { displayName: authName });
+        await setDoc(doc(db, "users", userCredential.user.uid), {
+          uid: userCredential.user.uid,
+          email: authEmail,
+          displayName: authName,
+          role: userRole,
+          photoURL: "",
+          keySkills: [],
+          completedCourses: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } else {
+        await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      }
+    } catch (err: any) {
+      console.error("Auth error details:", err);
+      let message = err.message;
+      if (err.code === 'auth/operation-not-allowed') {
+        const projectId = firebaseConfigData.projectId;
+        message = `SIGN-IN PROVIDER DISABLED: You must enable 'Email/Password' in the Firebase Console for project [${projectId}]. Visit: https://console.firebase.google.com/project/${projectId}/authentication/providers`;
+      } else if (err.code === 'auth/weak-password') {
+        message = "SECURITY ALERT: Password must be at least 6 characters.";
+      } else if (err.code === 'auth/email-already-in-use') {
+        message = "IDENTITY CONFLICT: This email is already registered. Try logging in instead.";
+      } else if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
+        message = "AUTH FAILURE: Incorrect email or password. Please verify your credentials.";
+      } else if (err.code === 'auth/unauthorized-domain') {
+        const domain = window.location.hostname;
+        const projectId = firebaseConfigData.projectId;
+        message = `UNAUTHORIZED DOMAIN: This URL [${domain}] is not allowed in your Firebase settings. Please visit: https://console.firebase.google.com/project/${projectId}/authentication/settings and add '${domain}' to 'Authorized domains'.`;
+      }
+      setAuthError(message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      await loginWithGoogle();
+    } catch (err: any) {
+      if (err.code !== 'auth/popup-closed-by-user') {
+        console.error("Google Auth error:", err);
+      }
+      if (err.code === 'auth/operation-not-allowed') {
+        setAuthError(
+          "Google authentication is not enabled. Please enable it in the Firebase Console."
+        );
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        setAuthError("Sign-in popup was closed. Please try again.");
+      } else if (err.code === 'auth/unauthorized-domain') {
+        const domain = window.location.hostname;
+        const projectId = firebaseConfigData.projectId;
+        setAuthError(`UNAUTHORIZED DOMAIN: This URL [${domain}] is not allowed in your Firebase settings. Please visit: https://console.firebase.google.com/project/${projectId}/authentication/settings and add '${domain}' to 'Authorized domains'.`);
+      } else {
+        setAuthError(err.message);
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const markCourseComplete = async (courseId: string, score: number) => {
+    if (!user) return;
+    const newCompleted = [...completedCourses, courseId];
+    setCompletedCourses(newCompleted);
+    
+    // Update User Doc
+    const userPath = `users/${user.uid}`;
+    try {
+      await setDoc(doc(db, "users", user.uid), { completedCourses: newCompleted }, { merge: true });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, userPath);
+    }
+    
+    // Update Enrollment
+    const enrollmentPath = `enrollments/${user.uid}_${courseId}`;
+    try {
+      await setDoc(doc(db, "enrollments", `${user.uid}_${courseId}`), {
+        progress: 100,
+        status: 'completed',
+        score: score,
+        certificateGenerated: true,
+        completedAt: new Date().toISOString()
+      }, { merge: true });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, enrollmentPath);
+    }
+    
+    setEnrollments(prev => ({
+      ...prev,
+      [courseId]: { progress: 100, status: 'completed' }
+    }));
+  };
+
+  const enrollInCourse = async (courseId: string) => {
+    if (!user) return;
+    const enrollmentId = `${user.uid}_${courseId}`;
+    const newEnrollment = {
+      userId: user.uid,
+      courseId,
+      progress: 0,
+      status: 'enrolled',
+      enrolledAt: new Date().toISOString()
+    };
+    
+    await setDoc(doc(db, "enrollments", enrollmentId), newEnrollment);
+    setEnrollments(prev => ({
+      ...prev,
+      [courseId]: { progress: 0, status: 'enrolled' }
+    }));
+  };
+
+  const handleEnrollWithPin = async (courseId: string) => {
+    if (!userProfile?.enrollmentPin) {
+      // If no PIN set, just enroll
+      return enrollInCourse(courseId);
+    }
+
+    setPinModal({ isOpen: true, courseId, error: null, pin: '' });
+  };
+
+  const verifyPinAndEnroll = () => {
+    if (pinModal.pin === userProfile.enrollmentPin) {
+      if (pinModal.courseId) enrollInCourse(pinModal.courseId);
+      setPinModal({ isOpen: false, courseId: null, error: null, pin: '' });
+    } else {
+      setPinModal(prev => ({ ...prev, error: "Invalid Enrollment Password. Access Denied." }));
+    }
+  };
+
+  if (loading) return (
+    <div className="min-h-screen bg-brand-cream flex items-center justify-center">
+      <div className="flex flex-col items-center gap-4">
+        <div className="w-12 h-12 border-4 border-brand-blue border-t-transparent rounded-full animate-spin" />
+        <p className="text-brand-muted font-medium">Initializing Ecosystem...</p>
+      </div>
+    </div>
+  );
+
+  // Authenticated Dashboard
+  if (user) return (
+    <div className="min-h-screen bg-brand-cream font-sans flex text-slate-900 overflow-hidden">
+      <AnimatePresence>
+        {pinModal.isOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-brand-ink/60 backdrop-blur-md"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-md p-10 rounded-[40px] shadow-2xl border border-white/20"
+            >
+              <div className="w-16 h-16 bg-brand-blue/10 rounded-3xl flex items-center justify-center mb-6">
+                <BookOpen className="w-8 h-8 text-brand-blue" />
+              </div>
+              <h2 className="text-[20px] font-display font-bold text-brand-blue-heading tracking-tight mb-2">Authentication Required</h2>
+              <p className="text-brand-muted text-sm font-medium mb-8 leading-relaxed">
+                Please enter your Professional Enrollment PIN/Password to access this curriculum module.
+              </p>
+
+              <div className="space-y-6">
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-brand-blue-heading uppercase tracking-widest block pl-1">Enrollment Key</label>
+                  <input 
+                    type="password" 
+                    placeholder="••••••"
+                    maxLength={6}
+                    value={pinModal.pin}
+                    onChange={(e) => setPinModal(prev => ({ ...prev, pin: e.target.value, error: null }))}
+                    className="w-full px-5 py-4 bg-brand-blue-light/30 border border-brand-border rounded-2xl font-bold text-center text-2xl tracking-[0.5em] outline-none focus:border-brand-blue focus:bg-white transition-all"
+                  />
+                </div>
+
+                {pinModal.error && (
+                  <p className="text-[10px] font-black text-red-500 uppercase tracking-widest text-center animate-shake">{pinModal.error}</p>
+                )}
+
+                <div className="flex gap-3 pt-2">
+                  <button 
+                    onClick={() => setPinModal({ isOpen: false, courseId: null, error: null, pin: '' })}
+                    className="flex-1 py-4 text-[11px] font-bold uppercase tracking-widest text-brand-muted hover:text-brand-blue-heading transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={verifyPinAndEnroll}
+                    className="flex-[2] py-4 bg-brand-blue text-white rounded-2xl text-[11px] font-bold uppercase tracking-widest shadow-lg shadow-blue-100 hover:bg-brand-blue-dark transition-all active:scale-95"
+                  >
+                    Authenticate & Enroll
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {activeCourse && (
+        <CourseContent 
+          course={activeCourse} 
+          onClose={() => setActiveCourse(null)} 
+          onComplete={(id, s) => markCourseComplete(id, s)}
+          userName={user.displayName || "Learner"}
+        />
+      )}
+      {/* Sidebar Navigation */}
+      <aside className="w-72 bg-white border-r border-brand-border flex flex-col h-screen sticky top-0 hidden lg:flex">
+        <div className="p-8 flex items-center gap-4">
+          <div className="w-12 h-12 bg-brand-blue rounded-2xl flex items-center justify-center shadow-xl shadow-blue-200">
+            {userRole === 'employee' ? <Briefcase className="w-6 h-6 text-white" /> : <GraduationCap className="w-6 h-6 text-white" />}
+          </div>
+          <div>
+            <span className="font-display font-bold text-[22px] tracking-tight text-brand-blue-heading block leading-tight">SkillHire</span>
+            <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md inline-block mt-0.5">
+              {userRole === 'employee' ? '💼 Employer Hub' : '🎓 Student Hub'}
+            </span>
+          </div>
+        </div>
+        
+        <nav className="flex-1 px-6 space-y-1.5 mt-4 overflow-y-auto">
+          {(userRole === 'employee' ? [
+            { id: 'career2skill', icon: Briefcase, label: 'Career2skill (Jobs & PPO)' },
+            { id: 'job_match', icon: Users, label: 'Applicant Skill Match' },
+            { id: 'my_courses', icon: GraduationCap, label: 'Courses & AI Creator' },
+            { id: 'resume', icon: Search, label: 'Resume ATS Review' },
+            { id: 'overview', icon: LayoutDashboard, label: 'Learning Overview' },
+            { id: 'profile', icon: Settings, label: 'Company Settings' }
+          ] : [
+            { id: 'overview', icon: LayoutDashboard, label: 'Dashboard Home' },
+            { id: 'my_courses', icon: GraduationCap, label: 'AI Customize Course' },
+            { id: 'path', icon: Map, label: 'Career Roadmap' },
+            { id: 'builder', icon: FileText, label: 'Resume Builder' },
+            { id: 'resume', icon: Search, label: 'Resume Analyzer' },
+            { id: 'career2skill', icon: Sparkles, label: 'Career2Skill' },
+            { id: 'profile', icon: Settings, label: 'Settings' }
+          ]).map(item => (
+            <button 
+              key={item.id}
+              onClick={() => setDashboardTab(item.id as any)}
+              className={cn(
+                "w-full flex items-center gap-4 px-4 py-3 rounded-xl font-semibold text-[14px] transition-all",
+                item.id === 'career2skill'
+                  ? dashboardTab === 'career2skill'
+                    ? "bg-sky-50 text-sky-500 shadow-sm font-bold"
+                    : "text-sky-500 hover:bg-sky-50/70 hover:text-sky-600"
+                  : (dashboardTab === item.id || (item.id === 'overview' && dashboardTab === 'overview' && userRole !== 'employee')) 
+                    ? "bg-brand-blue/10 text-brand-blue shadow-sm font-bold" 
+                    : "text-brand-muted hover:bg-brand-blue/5 hover:text-brand-blue"
+              )}
+            >
+              <item.icon className="w-4 h-4" />
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="p-6 border-t border-brand-border">
+          <div className="glass p-4 rounded-3xl relative group overflow-hidden">
+            <div className="flex items-center gap-3 relative z-10">
+              <img 
+                src={getAvatarUrl(userProfile?.photoURL || user.photoURL, userProfile?.displayName || user.displayName)} 
+                referrerPolicy="no-referrer"
+                className="w-10 h-10 rounded-full border-2 border-white shadow-sm object-cover"
+                alt="Profile"
+              />
+              <div className="flex-1 overflow-hidden">
+                <p className="text-xs font-bold text-brand-blue-heading truncate">{user.displayName}</p>
+                <p className="text-[10px] font-bold text-brand-muted truncate">
+                  {userRole === 'employee' ? '💼 Employee' : '🎓 Student'} · ID: {user.uid.slice(0, 6)}
+                </p>
+              </div>
+              <button onClick={logout} className="p-2 text-brand-muted hover:text-red-500 transition-colors">
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="absolute top-0 right-0 w-full h-full bg-gradient-to-br from-brand-blue/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+        {/* Top Bar */}
+        <header className="h-20 bg-white/60 backdrop-blur-xl border-b border-brand-border px-10 flex items-center justify-between sticky top-0 z-40">
+          <div className="flex-1 max-w-xl">
+            <div className="relative group">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-muted group-focus-within:text-brand-blue transition-colors" />
+              <input 
+                type="text" 
+                placeholder="Search courses..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-brand-cream/50 border border-brand-border rounded-xl py-2.5 pl-12 pr-4 text-[14px] font-medium outline-none focus:border-brand-blue focus:bg-white focus:ring-4 focus:ring-brand-blue/5 transition-all"
+              />
+              {searchResults.length > 0 && (
+                <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-3xl border border-brand-border shadow-2xl p-4 space-y-2 max-h-96 overflow-y-auto z-50">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-brand-muted px-2 mb-2">Search Results</p>
+                  {searchResults.map(course => (
+                    <button 
+                      key={course.id}
+                      onClick={() => {
+                        setActiveCourse(course);
+                        setSearchQuery('');
+                      }}
+                      className="w-full flex items-center gap-4 p-3 hover:bg-brand-blue-light/30 rounded-2xl transition-all text-left"
+                    >
+                      <div className="w-10 h-10 bg-brand-blue/10 rounded-xl flex items-center justify-center shrink-0">
+                        <BookOpen className="w-5 h-5 text-brand-blue" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-black text-brand-ink truncate">{course.title}</p>
+                        <p className="text-[10px] font-medium text-brand-muted truncate">{course.domain} • {course.duration}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-6 ml-8">
+            <div className="relative">
+              <button 
+                onClick={() => setShowNotifications(!showNotifications)}
+                className={cn(
+                  "relative p-2 text-brand-muted hover:text-brand-ink transition-colors rounded-xl",
+                  showNotifications && "bg-brand-blue-light/50 text-brand-blue"
+                )}
+              >
+                <Bell className="w-5 h-5" />
+                {notifications.filter(n => !n.read).length > 0 && (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white" />
+                )}
+              </button>
+              
+              <AnimatePresence>
+                {showNotifications && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                    className="absolute top-full right-0 mt-4 w-80 bg-white rounded-3xl border border-brand-border shadow-2xl overflow-hidden z-50"
+                  >
+                    <div className="p-4 border-b border-brand-border bg-brand-cream/30 flex justify-between items-center">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-brand-blue-heading">Notifications</p>
+                      <button 
+                        onClick={() => setShowNotifications(false)}
+                        className="text-[10px] font-black uppercase tracking-widest text-brand-muted hover:text-brand-ink"
+                      >
+                        Close
+                      </button>
+                    </div>
+                    <div className="max-h-96 overflow-y-auto">
+                      {notifications.length === 0 ? (
+                        <div className="p-10 text-center space-y-2">
+                          <p className="text-xs font-bold text-brand-ink">All caught up!</p>
+                          <p className="text-[10px] font-medium text-brand-muted">No new updates right now.</p>
+                        </div>
+                      ) : (
+                        notifications.map(n => (
+                          <div 
+                            key={n.id} 
+                            onClick={() => markNotificationRead(n.id)}
+                            className={cn(
+                              "p-4 border-b border-brand-border last:border-0 cursor-pointer transition-colors",
+                              n.read ? "opacity-60" : "bg-brand-blue-light/10"
+                            )}
+                          >
+                            <div className="flex gap-3">
+                              <div className={cn(
+                                "w-2 h-2 rounded-full mt-1.5 shrink-0",
+                                n.read ? "bg-transparent" : "bg-brand-blue"
+                              )} />
+                              <div className="space-y-1">
+                        <p className="text-xs font-bold text-brand-blue-heading leading-tight">{n.title}</p>
+                                <p className="text-[10px] font-medium text-brand-muted leading-relaxed">{n.message}</p>
+                                <p className="text-[8px] font-black text-brand-muted/50 uppercase tracking-widest">
+                                  {new Date(n.createdAt).toLocaleDateString()}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+            <div className="h-8 w-px bg-brand-border" />
+            <button onClick={() => setDashboardTab('profile')} className="flex items-center gap-3 group">
+              <div className="text-right hidden sm:block">
+                <p className="text-xs font-bold text-brand-blue-heading leading-none">{userProfile?.displayName || user.displayName}</p>
+                <p className="text-[10px] font-bold text-brand-muted uppercase tracking-widest mt-1">
+                  {userRole === 'employee' ? '💼 Employee / Recruiter' : '🎓 Student'}
+                </p>
+              </div>
+              <img 
+                src={getAvatarUrl(userProfile?.photoURL || user.photoURL, userProfile?.displayName || user.displayName)} 
+                referrerPolicy="no-referrer"
+                className="w-10 h-10 rounded-full border-2 border-brand-blue/20 group-hover:border-brand-blue transition-colors object-cover"
+                alt="Profile"
+              />
+            </button>
+          </div>
+        </header>
+
+        <main className="flex-1 p-10 space-y-8 overflow-y-auto bg-brand-cream/50">
+          {firebaseError && (
+            <div className="bg-red-50 border border-red-200 p-6 rounded-[32px] flex flex-col md:flex-row gap-6 items-start">
+              <div className="w-12 h-12 bg-red-100 rounded-2xl flex items-center justify-center shrink-0">
+                <Settings className="w-6 h-6 text-red-600" />
+              </div>
+              <div className="space-y-4 flex-1">
+                <h3 className="text-lg font-black text-red-900 leading-tight">Firebase Security Rules Required</h3>
+                <p className="text-sm text-red-700 font-medium leading-relaxed">
+                  Your project <span className="font-bold underline">[{firebaseConfigData.projectId}]</span> returned a <span className="font-mono bg-red-100 px-1 rounded px-1">PERMISSION_DENIED</span> error for path: <span className="font-mono bg-red-100 px-1 rounded">/{firebaseError.path}</span>. 
+                  <br /><br />
+                  Since this is your own Firebase project, you must **manually** deploy the security rules. 
+                  Visit the <a href={`https://console.firebase.google.com/project/${firebaseConfigData.projectId}/firestore/rules`} target="_blank" rel="noreferrer" className="underline font-bold hover:text-red-900">Firestore Rules Console</a> and paste the required rules provided in the chat.
+                </p>
+                
+                <div className="bg-brand-ink/5 p-4 rounded-2xl space-y-3">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-brand-ink">Required Configuration:</p>
+                  <ul className="text-[10px] font-bold text-brand-muted space-y-1 list-disc pl-4">
+                    <li>Copy rules from <code className="bg-brand-ink/10 px-1 rounded">firestore.rules</code> file in the project.</li>
+                    <li>Enable **Email/Password** and **Google** Auth providers.</li>
+                    <li>Add <code className="bg-brand-ink/10 px-1 rounded">{window.location.hostname}</code> to 'Authorized Domains' in Auth settings.</li>
+                    <li>Check if index for <code className="bg-brand-ink/10 px-1 rounded">notifications (userId ASC, createdAt DESC)</code> is required.</li>
+                  </ul>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    onClick={() => setFirebaseError(null)}
+                    className="text-[10px] font-black uppercase tracking-widest text-red-800 hover:opacity-70"
+                  >
+                    Dismiss Warning
+                  </button>
+                  <a 
+                    href={`https://console.firebase.google.com/project/${firebaseConfigData.projectId}/firestore/rules`} 
+                    target="_blank" 
+                    rel="noreferrer"
+                    className="text-[10px] font-black uppercase tracking-widest bg-red-600 text-white px-4 py-2 rounded-xl hover:bg-red-700 transition-colors"
+                  >
+                    Open Console
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {dashboardTab === 'profile' ? (
+            <div className="space-y-8">
+              <header>
+                <h1 className="text-[32px] font-display font-bold text-brand-blue-heading tracking-tight">Identity Management</h1>
+                <p className="text-brand-muted text-[15px] mt-1 font-medium leading-relaxed">Refine your professional presence across the SkillHire ecosystem.</p>
+              </header>
+              <div className="bg-white p-10 rounded-[32px] border border-brand-border/40 shadow-sm">
+                <ProfileEditor 
+                  user={user} 
+                  initialData={userProfile}
+                  onUpdate={(updatedData) => {
+                    setUserProfile(updatedData);
+                  }} 
+                />
+              </div>
+            </div>
+          ) : dashboardTab === 'my_courses' ? (
+            <CourseCatalogSection 
+              courses={dbCourses}
+              enrollments={enrollments}
+              completedCourses={completedCourses}
+              onEnroll={handleEnrollWithPin}
+              onComplete={(id, s) => markCourseComplete(id, s || 100)}
+              onView={(c) => setActiveCourse(c)}
+              userName={user.displayName || "Learner"}
+              onAddCustomCourse={handleAddCustomCourse}
+              isEmployee={userRole === 'employee'}
+            />
+          ) : dashboardTab === 'resume' ? (
+            <div className="space-y-10 max-w-4xl">
+              <header>
+                <h1 className="text-[32px] font-display font-bold text-brand-blue-heading tracking-tight">Resume Analyzer</h1>
+                <p className="text-brand-muted text-sm mt-1 font-medium">Upload your resume to get your ATS score, AI feedback, and keyword insights.</p>
+              </header>
+              <div className="glass p-12 rounded-[40px]">
+                <ResumeUploader onAnalysisComplete={handleAnalysisComplete} />
+              </div>
+              {analysis && (
+                <div className="grid grid-cols-1 gap-8">
+                  <div className="glass p-8 rounded-[32px] space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                      <h3 className="text-[12px] font-bold uppercase tracking-widest text-brand-blue">
+                        Summary - {analysis.candidateName || 'Candidate'}
+                      </h3>
+                      <div className="flex flex-wrap gap-3">
+                        <div className="bg-brand-blue/10 border border-brand-blue/20 px-4 py-2 rounded-xl">
+                          <p className="text-xs font-bold text-brand-blue">ATS Score: {analysis.atsScore ?? 0}/100</p>
+                        </div>
+                        <div className="bg-brand-cream border border-brand-border/40 px-4 py-2 rounded-xl">
+                          <p className="text-xs font-bold text-brand-ink">Role Match: {analysis.matchPercentage ?? 0}%</p>
+                        </div>
+                      </div>
+                    </div>
+                    <p className="text-sm font-medium text-brand-muted leading-relaxed">{analysis.summary}</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="glass p-8 rounded-[32px] space-y-4">
+                      <h3 className="text-[12px] font-bold uppercase tracking-widest text-brand-blue">Core Competencies & Keywords</h3>
+                      <div className="space-y-3">
+                        <p className="text-xs font-bold text-brand-ink mt-2">Top Strengths</p>
+                        <ul className="space-y-2">
+                          {analysis.topStrengths?.map((s, i) => (
+                            <li key={i} className="text-xs font-medium text-brand-muted flex gap-2">
+                              <span className="text-green-500">•</span> {s}
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="text-xs font-bold text-brand-ink mt-4">Found Keywords</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {analysis.keywordAnalysis?.foundKeywords?.length ? (
+                            analysis.keywordAnalysis.foundKeywords.map((kw, i) => (
+                              <span key={i} className="text-[10px] font-semibold px-2.5 py-1 bg-green-50 text-green-700 rounded-md border border-green-200">{kw}</span>
+                            ))
+                          ) : (
+                            <span className="text-xs text-brand-muted">No strong keywords detected yet.</span>
+                          )}
+                        </div>
+                        {analysis.keywordAnalysis?.missingKeywords?.length > 0 && (
+                          <>
+                            <p className="text-xs font-bold text-amber-700 mt-4">Recommended Missing Keywords</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {analysis.keywordAnalysis.missingKeywords.map((kw, i) => (
+                                <span key={i} className="text-[10px] font-semibold px-2.5 py-1 bg-amber-50 text-amber-700 rounded-md border border-amber-200">{kw}</span>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="glass p-8 rounded-[32px] space-y-4">
+                      <h3 className="text-[12px] font-bold uppercase tracking-widest text-brand-blue">Growth Protocol</h3>
+                      <div className="space-y-3">
+                        <p className="text-xs font-bold text-brand-ink mt-2">Actionable Improvements</p>
+                        <ul className="space-y-2">
+                          {analysis.actionableImprovements?.map((f, i) => (
+                            <li key={i} className="text-xs font-medium text-brand-muted flex gap-2">
+                              <span className="text-brand-blue">•</span> {f}
+                            </li>
+                          ))}
+                        </ul>
+                        {analysis.formattingIssues?.length > 0 && (
+                          <>
+                            <p className="text-xs font-bold text-red-500 mt-4">Formatting Issues</p>
+                            <ul className="space-y-2">
+                              {analysis.formattingIssues.map((issue, i) => (
+                                <li key={i} className="text-xs font-medium text-red-500 flex gap-2">
+                                  <span>⚠</span> {issue}
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {analysis.sectionFeedback && (
+                    <div className="glass p-8 rounded-[32px] space-y-4">
+                      <h3 className="text-[12px] font-bold uppercase tracking-widest text-brand-blue">Section-by-Section Review</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                        <div className="bg-brand-cream/70 border border-brand-border/30 p-4 rounded-2xl space-y-1.5">
+                          <p className="text-xs font-bold text-brand-ink uppercase tracking-wider">Education</p>
+                          <p className="text-xs text-brand-muted leading-relaxed">{analysis.sectionFeedback.education || 'No specific feedback.'}</p>
+                        </div>
+                        <div className="bg-brand-cream/70 border border-brand-border/30 p-4 rounded-2xl space-y-1.5">
+                          <p className="text-xs font-bold text-brand-ink uppercase tracking-wider">Experience</p>
+                          <p className="text-xs text-brand-muted leading-relaxed">{analysis.sectionFeedback.experience || 'No specific feedback.'}</p>
+                        </div>
+                        <div className="bg-brand-cream/70 border border-brand-border/30 p-4 rounded-2xl space-y-1.5">
+                          <p className="text-xs font-bold text-brand-ink uppercase tracking-wider">Projects</p>
+                          <p className="text-xs text-brand-muted leading-relaxed">{analysis.sectionFeedback.projects || 'No specific feedback.'}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : dashboardTab === 'path' ? (
+            <div className="space-y-8 max-w-5xl">
+              <header>
+                <h1 className="text-[32px] font-display font-bold text-brand-blue-heading tracking-tight">Career Roadmap</h1>
+                <p className="text-brand-muted text-sm mt-1 font-medium">Step-by-step learning paths tailored to your current skills and target role.</p>
+              </header>
+              <CareerPath 
+                skills={userProfile?.keySkills?.length ? userProfile.keySkills : (analysis?.keywordAnalysis?.foundKeywords || ['JavaScript', 'React', 'HTML', 'CSS', 'SQL'])} 
+                currentDomain={'Full Stack Development'} 
+                userProfile={userProfile}
+                onUpdateProfile={(updated) => setUserProfile((prev: any) => ({ ...prev, ...updated }))}
+                onNavigateToCourse={() => setDashboardTab('my_courses')}
+              />
+            </div>
+          ) : dashboardTab === 'interview' ? (
+            <div className="space-y-8 max-w-5xl">
+              <header>
+                <h1 className="text-[32px] font-display font-bold text-brand-blue-heading tracking-tight">Interview Simulation</h1>
+                <p className="text-brand-muted text-sm mt-1 font-medium">Test your depth against our adversarial AI interviewer. Zero-risk practice environment.</p>
+              </header>
+              <MockInterview />
+            </div>
+          ) : dashboardTab === 'career2skill' ? (
+            <div className="space-y-8 max-w-7xl">
+              <Career2SkillDashboard 
+                currentUserProfile={userProfile}
+                userRole={userRole}
+                userEmail={user.email || ''}
+                userName={user.displayName || 'Learner'}
+                onUpdateProfile={(updated) => setUserProfile((prev: any) => ({ ...prev, ...updated }))}
+                userSkills={userProfile?.keySkills?.length ? userProfile.keySkills : (analysis?.keywordAnalysis?.foundKeywords || ['JavaScript', 'HTML', 'CSS', 'React', 'Java', 'SQL', 'Python'])}
+                completedCourses={completedCourses}
+                onNavigateToCourse={() => setDashboardTab('my_courses')}
+                onViewCourse={(c) => setActiveCourse(c)}
+                courses={dbCourses}
+                onOpenSettings={() => setDashboardTab('profile')}
+              />
+            </div>
+          ) : dashboardTab === 'job_match' ? (
+            <div className="space-y-8 max-w-7xl">
+              <JobMatching 
+                userProfile={userProfile}
+                onUpdateProfile={(updated) => {
+                  setUserProfile((prev: any) => ({ ...prev, ...updated }));
+                }}
+                userSkills={userProfile?.keySkills?.length ? userProfile.keySkills : (analysis?.keywordAnalysis?.foundKeywords || ['JavaScript', 'HTML', 'CSS', 'React', 'Java', 'SQL', 'Python'])} 
+                completedCourses={completedCourses}
+                onNavigateToCourse={() => setDashboardTab('my_courses')}
+                onViewCourse={(c) => setActiveCourse(c)}
+                courses={dbCourses}
+                userEmail={user.email || ''}
+                userName={userProfile?.displayName || user.displayName || 'Candidate'}
+              />
+            </div>
+          ) : dashboardTab === 'builder' ? (
+            <div className="space-y-8">
+              <header>
+                <h1 className="text-[32px] font-display font-bold text-brand-blue-heading tracking-tight">Resume Builder</h1>
+                <p className="text-brand-muted text-sm mt-1 font-medium">Create a clean, ATS-friendly resume step by step and download it as PDF.</p>
+              </header>
+              <ResumeBuilder />
+            </div>
+          ) : (
+          <div className="flex flex-col lg:flex-row gap-8 items-start">
+            {/* Left Column: Courses & Search Courses */}
+            <div className="flex-[2] space-y-8 w-full">
+              <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                <div className="space-y-1">
+                  <h1 className="text-[40px] font-display font-bold text-brand-blue-heading tracking-tight">
+                    Welcome back, {user.displayName?.split(' ')[0]}
+                  </h1>
+                </div>
+                <div className="flex gap-2">
+                  {userProfile?.linkedin && (
+                    <a href={userProfile.linkedin.startsWith('http') ? userProfile.linkedin : `https://${userProfile.linkedin}`} target="_blank" rel="noopener noreferrer" className="p-3 bg-white rounded-xl border border-brand-border text-[#0077b5] hover:shadow-md transition-all hover:-translate-y-0.5">
+                      <Linkedin className="w-4 h-4" />
+                    </a>
+                  )}
+                  {userProfile?.github && (
+                    <a href={userProfile.github.startsWith('http') ? userProfile.github : `https://${userProfile.github}`} target="_blank" rel="noopener noreferrer" className="p-3 bg-white rounded-xl border border-brand-border text-[#333] hover:shadow-md transition-all hover:-translate-y-0.5">
+                      <Github className="w-4 h-4" />
+                    </a>
+                  )}
+                </div>
+              </header>
+
+              <section className="space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                  <div>
+                    <h2 className="text-[24px] font-display font-bold text-brand-blue-heading">Courses</h2>
+                    <p className="text-xs text-brand-muted mt-1 font-medium">Search and explore technical courses with verified certificates.</p>
+                  </div>
+                  <button 
+                    onClick={() => setDashboardTab('my_courses')}
+                    className="text-[12px] font-bold uppercase tracking-widest text-brand-blue flex items-center gap-2 hover:opacity-70 transition-opacity shrink-0"
+                  >
+                    All Courses ({dbCourses.length}) <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Search Courses Bar */}
+                <div className="relative">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-muted" />
+                  <input
+                    type="text"
+                    placeholder="Search courses by title, topic, or domain..."
+                    value={homeCourseSearch}
+                    onChange={(e) => setHomeCourseSearch(e.target.value)}
+                    className="w-full bg-white border border-brand-border rounded-2xl py-3 pl-11 pr-4 text-sm font-medium outline-none focus:border-brand-blue focus:ring-4 focus:ring-brand-blue/5 transition-all shadow-xs"
+                  />
+                </div>
+                
+                {(() => {
+                  const q = homeCourseSearch.trim().toLowerCase();
+                  const visibleCourses = q
+                    ? dbCourses.filter(c =>
+                        c.title.toLowerCase().includes(q) ||
+                        c.description.toLowerCase().includes(q) ||
+                        c.domain.toLowerCase().includes(q)
+                      )
+                    : dbCourses.slice(0, 6);
+
+                  if (visibleCourses.length === 0) {
+                    return (
+                      <div className="bg-white p-10 rounded-[28px] border border-brand-border text-center space-y-2">
+                        <p className="text-sm font-bold text-brand-blue-heading">No matching courses found</p>
+                        <p className="text-xs text-brand-muted">Try another keyword or clear your search.</p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      {visibleCourses.map(course => (
+                        <CourseCard 
+                          key={course.id} 
+                          course={course} 
+                          isEnrolled={!!enrollments[course.id]}
+                          isCompleted={completedCourses.includes(course.id)}
+                          progress={enrollments[course.id]?.progress || 0}
+                          onEnroll={handleEnrollWithPin}
+                          onComplete={(id, s) => markCourseComplete(id, s || 100)}
+                          onView={(c) => setActiveCourse(c)}
+                          userName={user.displayName || "Learner"}
+                        />
+                      ))}
+                    </div>
+                  );
+                })()}
+              </section>
+            </div>
+
+            {/* Right Column: Resume Score Icon */}
+            <div className="flex-1 space-y-8 w-full">
+              <div 
+                onClick={() => setDashboardTab('resume')}
+                className="glass p-8 rounded-[32px] border border-white/50 flex flex-col items-center text-center space-y-6 card-shadow cursor-pointer group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-brand-blue/10 rounded-xl flex items-center justify-center group-hover:bg-brand-blue group-hover:text-white transition-colors text-brand-blue">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <h3 className="text-[12px] font-bold uppercase tracking-widest text-brand-blue-heading">Resume Score</h3>
+                </div>
+                <ResumeScoreChart score={analysis?.atsScore || 0} />
+                <div className="space-y-2">
+                  <p className="text-[15px] font-bold text-brand-ink">
+                    {analysis ? 'ATS Resume Score' : 'Score Pending'}
+                  </p>
+                  <p className="text-[12px] font-medium text-brand-muted max-w-[200px]">
+                    {analysis 
+                      ? 'Your resume has been analyzed and scored for ATS compatibility.' 
+                      : 'Click to upload and analyze your resume score.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <footer className="pt-12 pb-12 text-center text-brand-muted text-[11px] font-bold uppercase tracking-[0.2em] opacity-40">
+          © 2026 Skill to Hire Platform — Built with Gemini 1.5 Pro
+        </footer>
+      </main>
+      <VirtualCareerAssistant />
+    </div>
+  </div>
+);
+
+  // Home Page - Premium SaaS Landing Page
+  if (view === 'home') return (
+    <LandingPage 
+      onLogin={() => setView('login')}
+      onRegister={() => setView('register')}
+    />
+  );
+
+  if (view === 'login') return (
+    <AuthPage 
+      type="login" 
+      setView={setView}
+      selectedRole={userRole}
+      setSelectedRole={setUserRole}
+      authEmail={authEmail}
+      setAuthEmail={setAuthEmail}
+      authPassword={authPassword}
+      setAuthPassword={setAuthPassword}
+      authName={authName}
+      setAuthName={setAuthName}
+      authError={authError}
+      authLoading={authLoading}
+      handleGoogleLogin={handleGoogleLogin}
+      handleEmailAuth={handleEmailAuth}
+    />
+  );
+  
+  if (view === 'register') return (
+    <AuthPage 
+      type="register" 
+      setView={setView}
+      selectedRole={userRole}
+      setSelectedRole={setUserRole}
+      authEmail={authEmail}
+      setAuthEmail={setAuthEmail}
+      authPassword={authPassword}
+      setAuthPassword={setAuthPassword}
+      authName={authName}
+      setAuthName={setAuthName}
+      authError={authError}
+      authLoading={authLoading}
+      handleGoogleLogin={handleGoogleLogin}
+      handleEmailAuth={handleEmailAuth}
+    />
+  );
+  
+  return null;
+}
+
+
