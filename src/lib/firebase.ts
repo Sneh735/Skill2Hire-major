@@ -1,4 +1,5 @@
 import { initializeApp } from 'firebase/app';
+import { getAnalytics, isSupported as isAnalyticsSupported, Analytics } from 'firebase/analytics';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
@@ -18,6 +19,18 @@ const firestoreDatabaseId =
   import.meta.env.VITE_FIREBASE_DATABASE_ID || firebaseConfigData.firestoreDatabaseId || '(default)';
 
 export const app = initializeApp(firebaseConfig);
+export let analytics: Analytics | null = null;
+if (typeof window !== 'undefined') {
+  isAnalyticsSupported()
+    .then((supported) => {
+      if (supported) {
+        analytics = getAnalytics(app);
+      }
+    })
+    .catch(() => {
+      // Ignore analytics errors when cookies/tracking are blocked in iframe
+    });
+}
 export const auth = getAuth(app);
 export const db = getFirestore(app, firestoreDatabaseId);
 export const storage = getStorage(app);

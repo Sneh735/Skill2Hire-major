@@ -59,13 +59,32 @@ export const generateRoadmap = async (skills: string[], targetDomain: string): P
   return postJson<RoadmapStep[]>("/api/ai/generate-roadmap", { skills, targetDomain });
 };
 
+export interface InterviewRoundSummary {
+  roundNumber: number;
+  scoreOutOf10: number;
+  strengths: string;
+  improvements: string;
+  spokenSummary: string;
+}
+
+export interface InterviewFeedbackResponse {
+  question: string;
+  feedback?: string;
+  answerScore?: number;
+  roundSummary?: InterviewRoundSummary;
+}
+
 export const getInterviewFeedback = async (
   topic: string,
-  history: { role: string; text: string }[]
-): Promise<{ question: string; feedback?: string }> => {
-  return postJson<{ question: string; feedback?: string }>("/api/ai/interview-feedback", {
+  history: { role: string; text: string }[],
+  answeredCount?: number,
+  recentScores?: number[]
+): Promise<InterviewFeedbackResponse> => {
+  return postJson<InterviewFeedbackResponse>("/api/ai/interview-feedback", {
     topic,
     history,
+    answeredCount,
+    recentScores,
   });
 };
 
@@ -121,11 +140,12 @@ export const transcribeAudio = async (
 };
 
 export const synthesizeSpeech = async (
-  text: string
+  text: string,
+  voiceName = "Zephyr"
 ): Promise<{ audioBase64: string; mimeType: string }> => {
   return postJson<{ audioBase64: string; mimeType: string }>(
     "/api/ai/tts",
-    { text },
+    { text, voiceName },
     15000
   );
 };
