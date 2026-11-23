@@ -1466,7 +1466,7 @@ Guidelines:
                   },
                 ],
               },
-            ],
+            ] as any,
             config: {
               responseModalities: ["AUDIO"],
               speechConfig: {
